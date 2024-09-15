@@ -1,10 +1,12 @@
 import os, glob
+import collections
 from dotenv import load_dotenv
 
 import discord
 import asyncio
 
 from src.logger import logger as logging
+from src.command import Event
 
 # Construct bot
 # -----------------------------
@@ -19,6 +21,8 @@ COMMAND_CHAR = '!'
 # -----------------------------
 commands = []
 name2cmd = {}
+events = collections.defaultdict(lambda: [])
+
 for file in glob.glob('commands/*.py'):
     file = file.split('/')[1].replace('.py', '')
     if file == "__init__":
@@ -29,7 +33,7 @@ for file in glob.glob('commands/*.py'):
     if 'add_commands' not in dir(module):
         raise RuntimeError(f'Missing add_commands() function in command file {file}')
 
-    module.add_commands(commands, client)
+    module.add_commands(commands, client, events)
 
 for command in commands:
     for alias in command.names:
@@ -43,6 +47,18 @@ async def on_ready():
     logging.info(f'{client.user} is connected to the following guilds:')
     for guild in client.guilds:
         logging.info(f'- {guild.name}(id: {guild.id})')
+
+    activity = discord.Game(name="Blue Archive")
+    await client.change_presence(status=discord.Status.idle, activity=activity)
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    if before.channel is None and after.channel:
+        for event in events[Event.USER_JOINED_VC]:
+            await event(member, before, after)
+    elif before.channel and after.channel is None:
+        for event in events[Event.USER_LEFT_VC]:
+            await event(member, before, after)
 
 @client.event
 async def on_message(message):

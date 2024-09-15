@@ -5,15 +5,32 @@ import glob
 from fuzzysearch import find_near_matches
 
 from src.logger import logger
-from src.command import Command
+from src.command import Command, Event
+from src.common import *
 
 audio_files = glob.glob('audio/*')
-vc = None # TODO global bot state
 currently_playing_sound = None
+
+
+async def play_audio(guild, channel, file):
+    global currently_playing_sound
+    vc = await get_vc(guild, channel)
+    if currently_playing_sound:
+        vc.stop_playing()
+    currently_playing_sound = True
+    vc.play(discord.FFmpegPCMAudio(file))
+
+    while vc.is_playing():
+        await asyncio.sleep(1)
+
+    vc.stop_playing()
+    currently_playing_sound = False
+
+# ---- Commands -----------
 
 async def play_func(client, message, args):
     if not len(args):
-        await message.reply(f'`Usage: !play <name>`. Use `!listsounds` to get a list of sound names.', mention_author=True)
+        await send_error_embed(message, f'`Usage: !play <name>`. Use `!listsounds` to get a list of sound names.')
         return
 
     if message.author.voice:
@@ -24,7 +41,10 @@ async def play_func(client, message, args):
         if args in names:
             file_to_play = audio_files[names.index(args)]
         if not file_to_play:
-            matches = [(name, find_near_matches(args.lower(), names[i].lower(), max_l_dist=8)) for i, name in enumerate(audio_files)]
+            def simplify(s):
+                return s.lower().replace('_', '').replace('-', '').replace(' ', '')
+
+            matches = [(name, find_near_matches(simplify(args), simplify(names[i]), max_l_dist=4)) for i, name in enumerate(audio_files)]
             best_match_dist = 99999999999
             for match in [m for m in matches if len(m[1])]:
                 best_match = min(match[1], key=lambda x: x.dist)
@@ -33,28 +53,20 @@ async def play_func(client, message, args):
                     file_to_play = match[0]
 
         if not file_to_play:
-            await message.reply(f'Unknown sound: `{args}`', mention_author=True)
+            await send_error_embed(message, f'Unknown sound: `{args}`')
             return
 
-        channel = message.author.voice.channel
-        global vc, currently_playing_sound
-        if not vc:
-            vc = await channel.connect()
+        await play_audio(message.guild, message.author.voice.channel, file_to_play)
+    else:
+        await send_error_embed(message, 'You are not in a voice channel :(')
 
-        if currently_playing_sound:
-            vc.stop()
-        currently_playing_sound = True
-        vc.play(discord.FFmpegPCMAudio(file_to_play))
-
-        while vc.is_playing():
-            await asyncio.sleep(1)
-
+async def die(client, message, args):
+    global currently_playing_sound
+    vc = message.guild.voice_client
+    if vc:
         vc.stop()
         currently_playing_sound = False
-        # await vc.disconnect()
-    else:
-        await message.reply('You are not in a voice channel :(', mention_author=True)
-
+        await vc.disconnect()
 
 async def list_sounds(client, message, args):
     names = [f.split('/')[-1].split('.')[0] for f in audio_files]
@@ -68,7 +80,21 @@ async def list_sounds(client, message, args):
 
     await message.reply(f'```{table}```', mention_author=True)
 
+async def on_user_join_vc(member, before, after):
+    if member.id == 293708811435507712: # Play you're an idiot when demo joins vc
+        await play_audio(member.guild, after.channel, "audio/youre_an_idiot.wav")
 
-def add_commands(commands, client):
-    commands.append(Command(['play', 'p'], play_func, help="Play soundboard sound"))
-    commands.append(Command(['listsounds', 'lp', 'listplay'], list_sounds, help="List sounds in soundboard"))
+async def leave_vc_if_empty(member, before, after):
+    vc = member.guild.voice_client
+    if vc is None or before.channel.id != vc.channel.id:
+        return
+    if len(vc.channel.members) == 1:
+        await vc.disconnect() # Leave if last
+
+def add_commands(commands, client, events):
+    commands.append(Command(['play', 'p'], play_func, help="`p <sound name>` - Play soundboard sound"))
+    commands.append(Command(['listsounds', 'lp', 'listplay'], list_sounds, help="`lp` - List sounds in soundboard"))
+    commands.append(Command(['dc', 'die', 'fuckoff'], die, help="`die` - Leave current vc in guild"))
+
+    events[Event.USER_JOINED_VC].append(on_user_join_vc)
+    events[Event.USER_LEFT_VC].append(leave_vc_if_empty)
